@@ -8,7 +8,31 @@ import {
   TrendingUp, Download, QrCode, Bell, Menu
 } from "lucide-react";
 
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
+import {
+  createQuiz,
+  createSession,
+  deleteQuiz,
+  duplicateQuiz,
+  getCurrentUser,
+  getMe,
+  getMyHistory,
+  getMyQuizzes,
+  getParticipants,
+  getQuiz,
+  joinSession,
+  login,
+  logout,
+  register,
+  startSession,
+  subscribeToSession,
+  type HistoryItem,
+  type QuizWithQuestions,
+  type SessionParticipant,
+  type QuizSession,
+  type UserProfile,
+  updateQuiz,
+} from "../lib/db";
+import { supabase } from "../lib/supabase";
 
 type Screen =
   | "login" | "register" | "dashboard" | "profile"
@@ -48,6 +72,49 @@ function Badge({ label, color }: { label: string; color: string }) {
       {label}
     </span>
   );
+}
+
+function getAuthErrorMessage(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+
+  if (!message) return fallback;
+  if (/Invalid login credentials/i.test(message)) return "Неверный email или пароль";
+  if (/Email not confirmed/i.test(message)) return "Подтвердите email";
+  if (/rate limit|too many requests|over_email_send_rate_limit/i.test(message)) {
+    return "Лимит регистраций временно исчерпан. Подождите немного и попробуйте снова";
+  }
+  if (/Email address .* is invalid|invalid email/i.test(message)) return "Укажите другой действующий email-адрес";
+  if (/already registered/i.test(message)) return "Пользователь с таким email уже существует";
+  if (/Password/i.test(message) && /6|8/.test(message)) return "Пароль должен быть не короче 8 символов";
+
+  return fallback;
+}
+
+function normalizeEmail(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function isValidEmail(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function isProtectedScreen(screen: Screen) {
+  return [
+    "dashboard",
+    "profile",
+    "my-quizzes",
+    "quiz-create",
+    "quiz-saved",
+    "quiz-launch",
+    "analytics",
+    "result-details",
+    "waiting-room",
+    "question",
+    "answer-result",
+    "organizer-control",
+    "leaderboard-mid",
+    "leaderboard-final",
+  ].includes(screen);
 }
 
 function Btn({
@@ -106,7 +173,7 @@ function Card({ children, className = "" }: { children: React.ReactNode; classNa
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
 
-function Nav({ screen, setScreen }: { screen: Screen; setScreen: (s: Screen) => void }) {
+function Nav({ screen, setScreen, user, onLogout }: { screen: Screen; setScreen: (s: Screen) => void; user: UserProfile | null; onLogout: () => void; }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const headerRef = useRef<HTMLElement>(null);
   const items = [
@@ -155,7 +222,14 @@ function Nav({ screen, setScreen }: { screen: Screen; setScreen: (s: Screen) => 
             onClick={() => setScreen("profile")}
             className="outline-none rounded-full hover:opacity-80 transition-opacity"
           >
-            <Avatar name="Алексей М" size={32} />
+            <Avatar name={user?.name ?? "Гость"} size={32} />
+          </button>
+          <button
+            onClick={onLogout}
+            className="w-8 h-8 rounded-full hover:bg-[#f2f3f5] flex items-center justify-center text-[#818c99] outline-none"
+            title="Выйти"
+          >
+            <LogOut size={16} />
           </button>
           <button
             className="md:hidden w-8 h-8 rounded-full hover:bg-[#f2f3f5] flex items-center justify-center text-[#818c99] outline-none"
@@ -187,10 +261,47 @@ function Nav({ screen, setScreen }: { screen: Screen; setScreen: (s: Screen) => 
 
 // ─── 1. Login ─────────────────────────────────────────────────────────────────
 
-function LoginScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
+function LoginScreen({
+  onLogin,
+  onGoRegister,
+  loading,
+  error,
+}: {
+  onLogin: (email: string, password: string) => Promise<void>;
+  onGoRegister: () => void;
+  loading: boolean;
+  error: string;
+}) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [err, setErr] = useState("");
+  const [localError, setLocalError] = useState("");
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLocalError("");
+    const normalizedEmail = normalizeEmail(email);
+
+    if (!normalizedEmail) {
+      setLocalError("Введите email");
+      return;
+    }
+
+    if (!isValidEmail(normalizedEmail)) {
+      setLocalError("Введите корректный email");
+      return;
+    }
+
+    if (!password.trim()) {
+      setLocalError("Введите пароль");
+      return;
+    }
+
+    try {
+      await onLogin(normalizedEmail, password);
+    } catch {
+      setLocalError(error || "Не удалось выполнить вход. Попробуйте ещё раз.");
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#f2f3f5] flex items-center justify-center p-4">
@@ -205,18 +316,19 @@ function LoginScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
 
         <Card className="p-6">
           <h2 className="text-lg font-semibold mb-5">Войти</h2>
-          <form className="flex flex-col gap-4" onSubmit={e => { e.preventDefault(); setScreen("dashboard"); }}>
-            <Input label="Email" type="email" placeholder="ivan@example.com" value={email} onChange={setEmail} />
-            <Input label="Пароль" type="password" placeholder="••••••••" value={password} onChange={setPassword} error={err} />
+          <form className="flex flex-col gap-4" onSubmit={submit}>
+            <Input label="Email" type="email" placeholder="ivan@example.com" value={email} onChange={setEmail} error={localError && !email.trim() ? localError : undefined} />
+            <Input label="Пароль" type="password" placeholder="••••••••" value={password} onChange={setPassword} error={localError && password ? localError : undefined} />
+            {(localError || error) && <p className="text-sm text-[#e64646]">{localError || error}</p>}
             <div className="flex justify-end">
               <button type="button" className="text-xs text-[#2787f5] hover:underline">Забыли пароль?</button>
             </div>
-            <Btn size="lg" type="submit" className="w-full">Войти</Btn>
+            <Btn size="lg" type="submit" className="w-full" disabled={loading}>{loading ? "Входим…" : "Войти"}</Btn>
           </form>
 
           <div className="mt-5 pt-5 border-t border-[rgba(0,0,0,0.06)] text-center text-sm text-[#818c99]">
             Нет аккаунта?{" "}
-            <button onClick={() => setScreen("register")} className="text-[#2787f5] font-semibold hover:underline">
+            <button onClick={onGoRegister} className="text-[#2787f5] font-semibold hover:underline">
               Зарегистрироваться
             </button>
           </div>
@@ -228,9 +340,37 @@ function LoginScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
 
 // ─── 2. Register ──────────────────────────────────────────────────────────────
 
-function RegisterScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
+function RegisterScreen({
+  onRegister,
+  onGoLogin,
+  loading,
+  error,
+  success,
+}: {
+  onRegister: (name: string, email: string, password: string) => Promise<void>;
+  onGoLogin: () => void;
+  loading: boolean;
+  error: string;
+  success: string;
+}) {
   const [form, setForm] = useState({ name: "", email: "", password: "", confirm: "" });
+  const [localErrors, setLocalErrors] = useState<{ name?: string; email?: string; password?: string; confirm?: string }>({});
   const f = (k: keyof typeof form) => (v: string) => setForm(p => ({ ...p, [k]: v }));
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const nextErrors: typeof localErrors = {};
+    const normalizedEmail = normalizeEmail(form.email);
+
+    if (!form.name.trim()) nextErrors.name = "Введите имя";
+    if (!normalizedEmail) nextErrors.email = "Введите email";
+    else if (!isValidEmail(normalizedEmail)) nextErrors.email = "Введите корректный email";
+    if ((form.password || "").length < 8) nextErrors.password = "Пароль должен быть не короче 8 символов";
+    if (form.password !== form.confirm) nextErrors.confirm = "Пароли не совпадают";
+    setLocalErrors(nextErrors);
+    if (Object.keys(nextErrors).length > 0) return;
+    await onRegister(form.name.trim(), normalizedEmail, form.password);
+  };
 
   return (
     <div className="min-h-screen bg-[#f2f3f5] flex items-center justify-center p-4">
@@ -244,16 +384,17 @@ function RegisterScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
 
         <Card className="p-6">
           <h2 className="text-lg font-semibold mb-5">Регистрация</h2>
-          <form className="flex flex-col gap-4" onSubmit={e => { e.preventDefault(); setScreen("dashboard"); }}>
-            <Input label="Имя пользователя" placeholder="ivan_petrov" value={form.name} onChange={f("name")} />
-            <Input label="Email" type="email" placeholder="ivan@example.com" value={form.email} onChange={f("email")} />
-            <Input label="Пароль" type="password" placeholder="Минимум 8 символов" value={form.password} onChange={f("password")} />
-            <Input label="Подтверждение пароля" type="password" placeholder="Повторите пароль" value={form.confirm} onChange={f("confirm")} error={form.confirm && form.confirm !== form.password ? "Пароли не совпадают" : ""} />
-            <Btn size="lg" type="submit" className="w-full mt-1">Создать аккаунт</Btn>
+          <form className="flex flex-col gap-4" onSubmit={submit}>
+            <Input label="Имя пользователя" placeholder="ivan_petrov" value={form.name} onChange={f("name")} error={localErrors.name} />
+            <Input label="Email" type="email" placeholder="ivan@example.com" value={form.email} onChange={f("email")} error={localErrors.email} />
+            <Input label="Пароль" type="password" placeholder="Минимум 8 символов" value={form.password} onChange={f("password")} error={localErrors.password} />
+            <Input label="Подтверждение пароля" type="password" placeholder="Повторите пароль" value={form.confirm} onChange={f("confirm")} error={localErrors.confirm} />
+            {(error || success) && <p className={`text-sm ${error ? "text-[#e64646]" : "text-[#4bb34b]"}`}>{error || success}</p>}
+            <Btn size="lg" type="submit" className="w-full mt-1" disabled={loading}>{loading ? "Создаём…" : "Создать аккаунт"}</Btn>
           </form>
           <p className="mt-5 pt-5 border-t border-[rgba(0,0,0,0.06)] text-center text-sm text-[#818c99]">
             Уже есть аккаунт?{" "}
-            <button onClick={() => setScreen("login")} className="text-[#2787f5] font-semibold hover:underline">Войти</button>
+            <button onClick={onGoLogin} className="text-[#2787f5] font-semibold hover:underline">Войти</button>
           </p>
         </Card>
       </div>
@@ -263,72 +404,59 @@ function RegisterScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
 
 // ─── 3. Dashboard ─────────────────────────────────────────────────────────────
 
-function DashboardScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
+function DashboardScreen({
+  setScreen,
+  user,
+  onLogout,
+  onJoinSession,
+  onOpenQuiz,
+}: {
+  setScreen: (s: Screen) => void;
+  user: UserProfile | null;
+  onLogout: () => void;
+  onJoinSession: (code: string) => Promise<void>;
+  onOpenQuiz: (quizId?: string) => void;
+}) {
   const [code, setCode] = useState("");
-  const recent = [
-    { title: "История России XIX–XX вв.", questions: 20, attempts: 142, status: "published" },
-    { title: "Математика: базовый уровень", questions: 15, attempts: 89, status: "published" },
-    { title: "Черновик: Физика", questions: 8, attempts: 0, status: "draft" },
-  ];
+  const [recent, setRecent] = useState<QuizWithQuestions[]>([]);
+  const [loadingRecent, setLoadingRecent] = useState(true);
+  const [joinLoading, setJoinLoading] = useState(false);
+  const [joinError, setJoinError] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    async function loadRecent() {
+      try {
+        setLoadingRecent(true);
+        const data = await getMyQuizzes();
+        if (alive) setRecent(data.slice(0, 3));
+      } catch {
+        if (alive) setRecent([]);
+      } finally {
+        if (alive) setLoadingRecent(false);
+      }
+    }
+
+    void loadRecent();
+    return () => { alive = false; };
+  }, []);
+
+  const join = async () => {
+    setJoinError("");
+    setJoinLoading(true);
+    try {
+      await onJoinSession(code);
+    } catch {
+      setJoinError("Не удалось присоединиться к квизу");
+    } finally {
+      setJoinLoading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#f2f3f5]">
-      <Nav screen="dashboard" setScreen={setScreen} />
+      <Nav screen="dashboard" setScreen={setScreen} user={user} onLogout={onLogout} />
       <main className="max-w-5xl mx-auto px-4 py-8 grid gap-6">
-
-        <Card className="p-5">
-          <Tabs defaultValue="frontend" className="gap-4">
-            <TabsList className="w-full h-auto p-1.5 bg-[#f2f3f5] rounded-2xl flex flex-wrap gap-1">
-              <TabsTrigger value="frontend" className="rounded-xl px-4 py-2 flex-1 min-w-[140px]">Фронтенд</TabsTrigger>
-              <TabsTrigger value="design" className="rounded-xl px-4 py-2 flex-1 min-w-[140px]">Дизайн</TabsTrigger>
-              <TabsTrigger value="structure" className="rounded-xl px-4 py-2 flex-1 min-w-[140px]">Структура</TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="frontend" className="pt-2">
-              <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded-2xl border border-[rgba(0,0,0,0.06)] bg-white p-4">
-                  <p className="text-xs font-semibold text-[#818c99] uppercase tracking-wide">Установка</p>
-                  <p className="mt-2 text-sm text-[#19191a]">npm i</p>
-                </div>
-                <div className="rounded-2xl border border-[rgba(0,0,0,0.06)] bg-white p-4">
-                  <p className="text-xs font-semibold text-[#818c99] uppercase tracking-wide">Запуск</p>
-                  <p className="mt-2 text-sm text-[#19191a]">npm run dev</p>
-                </div>
-                <div className="rounded-2xl border border-[rgba(0,0,0,0.06)] bg-white p-4">
-                  <p className="text-xs font-semibold text-[#818c99] uppercase tracking-wide">Адрес</p>
-                  <p className="mt-2 text-sm text-[#19191a]">http://localhost:5173/</p>
-                </div>
-              </div>
-            </TabsContent>
-
-            <TabsContent value="design" className="pt-2">
-              <div className="grid gap-3 md:grid-cols-2">
-                <div className="rounded-2xl border border-[rgba(0,0,0,0.06)] bg-white p-4">
-                  <p className="text-xs font-semibold text-[#818c99] uppercase tracking-wide">Визуальный стиль</p>
-                  <p className="mt-2 text-sm text-[#19191a]">VK-ориентированные светлые карточки, синий акцент и мягкие статусы.</p>
-                </div>
-                <div className="rounded-2xl border border-[rgba(0,0,0,0.06)] bg-white p-4">
-                  <p className="text-xs font-semibold text-[#818c99] uppercase tracking-wide">Интерфейс</p>
-                  <p className="mt-2 text-sm text-[#19191a]">Минимальный dashboard, быстрые действия и отдельные экраны для каждого сценария.</p>
-                </div>
-              </div>
-            </TabsContent>
-
-            <TabsContent value="structure" className="pt-2">
-              <div className="grid gap-3 md:grid-cols-2">
-                <div className="rounded-2xl border border-[rgba(0,0,0,0.06)] bg-white p-4">
-                  <p className="text-xs font-semibold text-[#818c99] uppercase tracking-wide">Основной экран</p>
-                  <p className="mt-2 text-sm text-[#19191a]">src/app/App.tsx</p>
-                </div>
-                <div className="rounded-2xl border border-[rgba(0,0,0,0.06)] bg-white p-4">
-                  <p className="text-xs font-semibold text-[#818c99] uppercase tracking-wide">UI-компоненты</p>
-                  <p className="mt-2 text-sm text-[#19191a]">src/app/components/ui</p>
-                </div>
-              </div>
-            </TabsContent>
-          </Tabs>
-        </Card>
-
         {/* Join quiz */}
         <Card className="p-8">
           <h2 className="text-xl font-bold text-[#19191a] mb-2">Присоединиться к квизу</h2>
@@ -342,16 +470,17 @@ function DashboardScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
               onChange={e => setCode(e.target.value.replace(/\D/g, ""))}
               className="flex-1 px-5 py-3 rounded-xl border border-[rgba(0,0,0,0.12)] text-2xl font-bold tracking-[0.3em] text-center bg-white outline-none focus:ring-2 focus:ring-[#2787f5]/30 focus:border-[#2787f5] transition-all"
             />
-            <Btn size="lg" onClick={() => setScreen("waiting-room")} disabled={code.length !== 6} className="px-8">
-              Войти
+            <Btn size="lg" onClick={join} disabled={code.length !== 6 || joinLoading} className="px-8">
+              {joinLoading ? "Входим…" : "Войти"}
             </Btn>
           </div>
+          {joinError && <p className="mt-3 text-sm text-[#e64646]">{joinError}</p>}
         </Card>
 
         {/* Create + Recent */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <button
-            onClick={() => setScreen("quiz-create")}
+            onClick={() => onOpenQuiz()}
             className="group bg-white rounded-2xl shadow-[0_1px_4px_rgba(0,0,0,0.08)] p-8 flex flex-col items-center justify-center gap-3 hover:shadow-[0_4px_20px_rgba(39,135,245,0.15)] hover:border-[#2787f5] border border-transparent transition-all duration-200 text-center"
           >
             <div className="w-14 h-14 bg-[#d6e8ff] rounded-2xl flex items-center justify-center group-hover:bg-[#2787f5] transition-colors">
@@ -370,6 +499,8 @@ function DashboardScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
                 Все квизы <ChevronRight size={14} />
               </button>
             </div>
+            {loadingRecent && <p className="text-sm text-[#818c99]">Загрузка квизов…</p>}
+            {!loadingRecent && recent.length === 0 && <p className="text-sm text-[#818c99]">Пока нет созданных квизов.</p>}
             {recent.map((q, i) => (
               <Card key={i} className="px-4 py-3 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-3 min-w-0">
@@ -379,11 +510,13 @@ function DashboardScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
                   </div>
                   <div className="min-w-0">
                     <p className="font-medium text-sm text-[#19191a] truncate">{q.title}</p>
-                    <p className="text-xs text-[#818c99]">{q.questions} вопр. · {q.attempts} попыток</p>
+                    <p className="text-xs text-[#818c99]">
+                      {q.questions.length} вопр. · {q.attemptCount} попыток
+                    </p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
-                  <Btn size="sm" variant="ghost" onClick={() => setScreen("quiz-launch")}>
+                  <Btn size="sm" variant="ghost" onClick={() => onOpenQuiz(q.id)}>
                     <Play size={14} />
                   </Btn>
                 </div>
@@ -399,28 +532,51 @@ function DashboardScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
 
 // ─── 4. Profile ───────────────────────────────────────────────────────────────
 
-function ProfileScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
-  const history = [
-    { title: "Всемирная история", date: "22 июля 2026", score: 1840, max: 2000, pos: 3, pct: 91 },
-    { title: "Химия ЕГЭ", date: "20 июля 2026", score: 1230, max: 1500, pos: 7, pct: 78 },
-    { title: "Английский B2", date: "18 июля 2026", score: 1400, max: 2000, pos: 12, pct: 70 },
-    { title: "Физика базовый", date: "15 июля 2026", score: 900, max: 1000, pos: 1, pct: 96 },
-  ];
+function ProfileScreen({ setScreen, user, onLogout }: { setScreen: (s: Screen) => void; user: UserProfile | null; onLogout: () => void }) {
+  const [profile, setProfile] = useState<UserProfile | null>(user);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [loading, setLoading] = useState(!user);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    async function loadProfile() {
+      try {
+        setLoading(true);
+        setError("");
+        const data = await getMe();
+        if (alive) setProfile(data);
+        const items = await getMyHistory();
+        if (alive) setHistory(items);
+      } catch {
+        if (alive) setError("Не удалось загрузить профиль");
+      } finally {
+        if (alive) setLoading(false);
+        if (alive) setHistoryLoading(false);
+      }
+    }
+
+    void loadProfile();
+    return () => { alive = false; };
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#f2f3f5]">
-      <Nav screen="profile" setScreen={setScreen} />
+      <Nav screen="profile" setScreen={setScreen} user={profile} onLogout={onLogout} />
       <main className="max-w-5xl mx-auto px-4 py-8 grid gap-6">
+        {loading && <Card className="p-6 text-sm text-[#818c99]">Загрузка профиля…</Card>}
+        {error && <Card className="p-6 text-sm text-[#e64646]">{error}</Card>}
         <Card className="p-6">
           <div className="flex items-center gap-5">
-            <Avatar name="Алексей Михайлов" size={72} />
+            <Avatar name={profile?.name ?? "Профиль"} size={72} />
             <div>
-              <h2 className="text-xl font-bold">Алексей Михайлов</h2>
-              <p className="text-[#818c99] text-sm">alexei@example.com</p>
-              <p className="text-[#818c99] text-xs mt-1">На платформе с 14 января 2025</p>
+              <h2 className="text-xl font-bold">{profile?.name ?? "Профиль пользователя"}</h2>
+              <p className="text-[#818c99] text-sm">{profile?.email ?? "—"}</p>
+              <p className="text-[#818c99] text-xs mt-1">На платформе с {profile?.createdAt ? new Date(profile.createdAt).toLocaleDateString("ru-RU") : "—"}</p>
             </div>
             <div className="ml-auto hidden md:flex gap-6">
-              {[["47", "Квизов пройдено"], ["12", "Квизов создано"]].map(([v, l], i) => (
+              {[[String(profile?.quizzesPlayed ?? 0), "Квизов пройдено"], [String(profile?.quizzesCreated ?? 0), "Квизов создано"]].map(([v, l], i) => (
                 <div key={i} className="text-center">
                   <p className="text-2xl font-bold text-[#2787f5]">{v}</p>
                   <p className="text-xs text-[#818c99]">{l}</p>
@@ -431,25 +587,23 @@ function ProfileScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
         </Card>
 
         <h3 className="font-semibold text-[#19191a]">История участия</h3>
+        {historyLoading && <Card className="p-6 text-sm text-[#818c99]">Загрузка истории…</Card>}
+        {!historyLoading && history.length === 0 && <Card className="p-6 text-sm text-[#818c99]">История пока пуста.</Card>}
         {history.map((h, i) => (
           <Card key={i} className="px-5 py-4">
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div>
                 <p className="font-semibold text-[#19191a]">{h.title}</p>
-                <p className="text-xs text-[#818c99] mt-0.5">{h.date}</p>
+                <p className="text-xs text-[#818c99] mt-0.5">{new Date(h.playedAt).toLocaleDateString("ru-RU")}</p>
               </div>
               <div className="flex items-center gap-6 text-sm">
                 <div className="text-center">
-                  <p className="font-bold text-[#19191a]">{h.score}<span className="text-[#818c99] font-normal">/{h.max}</span></p>
+                  <p className="font-bold text-[#19191a]">{h.score}</p>
                   <p className="text-xs text-[#818c99]">Баллы</p>
                 </div>
                 <div className="text-center">
-                  <p className="font-bold" style={{ color: h.pos <= 3 ? ORANGE : "#19191a" }}>#{h.pos}</p>
+                  <p className="font-bold" style={{ color: h.rank <= 3 ? ORANGE : "#19191a" }}>#{h.rank}</p>
                   <p className="text-xs text-[#818c99]">Позиция</p>
-                </div>
-                <div className="text-center">
-                  <p className="font-bold" style={{ color: h.pct >= 80 ? GREEN : h.pct >= 60 ? ORANGE : RED }}>{h.pct}%</p>
-                  <p className="text-xs text-[#818c99]">Верных</p>
                 </div>
                 <button onClick={() => setScreen("result-details")} className="text-xs text-[#2787f5] hover:underline flex items-center gap-1">
                   Детали <ChevronRight size={13} />
@@ -468,13 +622,45 @@ function ProfileScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
 
 // ─── 5. My Quizzes ────────────────────────────────────────────────────────────
 
-function MyQuizzesScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
-  const quizzes = [
-    { title: "История России XIX–XX вв.", questions: 20, status: "published", created: "10 июл 2026", updated: "20 июл 2026", attempts: 142 },
-    { title: "Математика: базовый уровень", questions: 15, status: "published", created: "5 июн 2026", updated: "18 июл 2026", attempts: 89 },
-    { title: "Черновик: Физика", questions: 8, status: "draft", created: "22 июл 2026", updated: "22 июл 2026", attempts: 0 },
-    { title: "Химия ЕГЭ 2026", questions: 30, status: "published", created: "1 мар 2026", updated: "15 июл 2026", attempts: 317 },
-  ];
+function MyQuizzesScreen({
+  setScreen,
+  onEditQuiz,
+  onLaunchQuiz,
+}: {
+  setScreen: (s: Screen) => void;
+  onEditQuiz: (quizId?: string) => void;
+  onLaunchQuiz: (quizId: string) => void;
+}) {
+  const [quizzes, setQuizzes] = useState<QuizWithQuestions[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadQuizzes = async () => {
+    try {
+      setLoading(true);
+      setError("");
+      const data = await getMyQuizzes();
+      setQuizzes(data);
+    } catch {
+      setError("Не удалось загрузить квизы");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadQuizzes();
+  }, []);
+
+  const handleDelete = async (quizId: string) => {
+    await deleteQuiz(quizId);
+    await loadQuizzes();
+  };
+
+  const handleDuplicate = async (quizId: string) => {
+    await duplicateQuiz(quizId);
+    await loadQuizzes();
+  };
 
   return (
     <div className="min-h-screen bg-[#f2f3f5]">
@@ -486,7 +672,9 @@ function MyQuizzesScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
         </div>
 
         <div className="grid gap-4 md:grid-cols-2">
-          {quizzes.map((q, i) => (
+          {loading && <Card className="p-5 text-sm text-[#818c99]">Загрузка квизов…</Card>}
+          {error && <Card className="p-5 text-sm text-[#e64646]">{error}</Card>}
+          {!loading && !error && quizzes.map((q, i) => (
             <Card key={i} className="p-5 flex flex-col gap-4">
               <div className="flex items-start gap-3">
                 <div className="w-12 h-12 rounded-xl bg-[#f2f3f5] flex items-center justify-center flex-shrink-0 overflow-hidden">
@@ -499,21 +687,22 @@ function MyQuizzesScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
                 <div className="flex-1 min-w-0">
                   <p className="font-semibold text-[#19191a] truncate">{q.title}</p>
                   <div className="flex items-center gap-2 mt-1">
-                    <span className="text-xs text-[#818c99]">{q.questions} вопр.</span>
+                    <span className="text-xs text-[#818c99]">{q.questions.length} вопр.</span>
                   </div>
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3 text-center text-xs bg-[#f8f9fb] rounded-xl px-3 py-2.5">
-                <div><p className="font-semibold text-[#19191a]">{q.attempts}</p><p className="text-[#818c99]">Попыток</p></div>
-                <div><p className="font-semibold text-[#19191a]">{q.created}</p><p className="text-[#818c99]">Создан</p></div>
+                <div><p className="font-semibold text-[#19191a]">{q.attemptCount}</p><p className="text-[#818c99]">Попыток</p></div>
+                <div><p className="font-semibold text-[#19191a]">{new Date(q.createdAt).toLocaleDateString("ru-RU")}</p><p className="text-[#818c99]">Создан</p></div>
               </div>
 
               <div className="flex gap-1.5 flex-wrap">
-                <Btn size="sm" variant="secondary" onClick={() => setScreen("quiz-create")}><Edit3 size={13} />Ред.</Btn>
-                <Btn size="sm" onClick={() => setScreen("quiz-launch")}><Play size={13} />Запуск</Btn>
+                <Btn size="sm" variant="secondary" onClick={() => onEditQuiz(q.id)}><Edit3 size={13} />Ред.</Btn>
+                <Btn size="sm" onClick={() => onLaunchQuiz(q.id)}><Play size={13} />Запуск</Btn>
                 <Btn size="sm" variant="secondary"><Copy size={13} />Копировать</Btn>
-                <Btn size="sm" variant="secondary" className="ml-auto !text-[#e64646] hover:bg-red-50"><Trash2 size={13} />Удалить</Btn>
+                <Btn size="sm" variant="secondary" onClick={() => handleDuplicate(q.id)}><Copy size={13} />Дублировать</Btn>
+                <Btn size="sm" variant="secondary" className="ml-auto !text-[#e64646] hover:bg-red-50" onClick={() => handleDelete(q.id)}><Trash2 size={13} />Удалить</Btn>
               </div>
             </Card>
           ))}
@@ -540,10 +729,20 @@ interface Question {
   imageUrl?: string;
 }
 
-function QuizCreateScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
+function QuizCreateScreen({
+  setScreen,
+  quizId,
+  onSaved,
+}: {
+  setScreen: (s: Screen) => void;
+  quizId: string | null;
+  onSaved: (quiz: QuizWithQuestions) => void;
+}) {
   const [title, setTitle] = useState("Новый квиз");
   const [desc, setDesc] = useState("");
   const [saved, setSaved] = useState<"idle" | "saving" | "saved">("idle");
+  const [loading, setLoading] = useState(!!quizId);
+  const [error, setError] = useState("");
   const [questions, setQuestions] = useState<Question[]>([
     { id: 1, type: "single", text: "Кто написал «Войну и мир»?", options: ["Достоевский", "Толстой", "Тургенев", "Чехов"], correct: [1], points: 100, time: 30 },
     { id: 2, type: "truefalse", text: "Вода кипит при 100°C на уровне моря", options: ["Верно", "Неверно"], correct: [0], points: 50, time: 15 },
@@ -551,19 +750,94 @@ function QuizCreateScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
   const [settings, setSettings] = useState({ shuffle: false, defaultTime: 30 });
   const [showSettings, setShowSettings] = useState(false);
 
+  useEffect(() => {
+    if (!quizId) return;
+    let alive = true;
+
+    async function loadQuiz() {
+      try {
+        setLoading(true);
+        setError("");
+        const quiz = await getQuiz(quizId);
+        if (!alive) return;
+
+        setTitle(quiz.title);
+        setDesc(quiz.description ?? "");
+        setSettings({ shuffle: quiz.shuffleQuestions, defaultTime: quiz.defaultTimeSec });
+        setQuestions(
+          quiz.questions.map((question, index) => ({
+            id: index + 1,
+            type: question.type as QuestionType,
+            text: question.text,
+            options: question.type === "text" ? [question.options[0]?.text ?? ""] : question.options.map((option) => option.text),
+            correct: question.options.reduce<number[]>((acc, option, optionIndex) => {
+              if (option.isCorrect) acc.push(optionIndex);
+              return acc;
+            }, []),
+            points: question.points,
+            time: question.timeSec,
+            imageUrl: question.imageUrl,
+          })),
+        );
+      } catch {
+        if (alive) setError("Не удалось загрузить квиз");
+      } finally {
+        if (alive) setLoading(false);
+      }
+    }
+
+    void loadQuiz();
+    return () => { alive = false; };
+  }, [quizId]);
+
   const addQuestion = () => {
     setQuestions(q => [...q, { id: Date.now(), type: "single", text: "", options: ["", "", "", ""], correct: [], points: 100, time: 30 }]);
   };
 
-  const save = () => {
+  const save = async () => {
     setSaved("saving");
-    setTimeout(() => { setSaved("saved"); setTimeout(() => setScreen("quiz-saved"), 800); }, 900);
+    setError("");
+
+    try {
+      const payload = {
+        title,
+        description: desc || undefined,
+        shuffleQuestions: settings.shuffle,
+        defaultTimeSec: settings.defaultTime,
+        questions: questions.map((question) => ({
+          type: question.type,
+          text: question.text,
+          imageUrl: question.imageUrl,
+          points: question.points,
+          timeSec: question.time,
+          options: question.options
+            .filter((option) => option.trim().length > 0)
+            .map((option, index) => ({
+              text: option,
+              isCorrect: question.correct.includes(index),
+            })),
+        })),
+      };
+
+      const savedQuiz = quizId
+        ? await updateQuiz(quizId, payload)
+        : await createQuiz(payload);
+
+      setSaved("saved");
+      onSaved(savedQuiz);
+    } catch {
+      setError("Не удалось сохранить квиз");
+      setSaved("idle");
+    }
   };
 
   return (
     <div className="min-h-screen bg-[#f2f3f5]">
       <Nav screen="my-quizzes" setScreen={setScreen} />
       <div className="max-w-5xl mx-auto px-4 py-8 grid gap-6">
+
+        {loading && <Card className="p-6 text-sm text-[#818c99]">Загрузка квиза…</Card>}
+        {error && <Card className="p-6 text-sm text-[#e64646]">{error}</Card>}
 
         {/* Header card */}
         <Card className="p-6">
@@ -576,7 +850,7 @@ function QuizCreateScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
               <Btn size="sm" variant="secondary" onClick={() => setShowSettings(!showSettings)}>
                 <Settings size={14} /> Настройки
               </Btn>
-              <Btn size="sm" onClick={save}>
+              <Btn size="sm" onClick={save} disabled={loading || saved === "saving"}>
                 {saved === "saving" ? "…" : "Сохранить"}
               </Btn>
             </div>
@@ -952,7 +1226,19 @@ function QuestionCard({ question, index, onChange, onDelete, onDuplicate }: {
 
 // ─── 7. Quiz Saved ────────────────────────────────────────────────────────────
 
-function QuizSavedScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
+function QuizSavedScreen({
+  setScreen,
+  quiz,
+  onEdit,
+  onOpenMyQuizzes,
+  onLaunch,
+}: {
+  setScreen: (s: Screen) => void;
+  quiz: QuizWithQuestions | null;
+  onEdit: () => void;
+  onOpenMyQuizzes: () => void;
+  onLaunch: () => void;
+}) {
   return (
     <div className="min-h-screen bg-[#f2f3f5]">
       <Nav screen="my-quizzes" setScreen={setScreen} />
@@ -962,12 +1248,12 @@ function QuizSavedScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
         </div>
         <div className="text-center">
           <h2 className="text-2xl font-bold text-[#19191a]">Квиз сохранён!</h2>
-          <p className="text-[#818c99] mt-2">«История России XIX–XX вв.» успешно сохранён и готов к публикации</p>
+          <p className="text-[#818c99] mt-2">«{quiz?.title ?? "Квиз"}» успешно сохранён и готов к публикации</p>
         </div>
         <div className="flex gap-3 flex-wrap justify-center">
-          <Btn variant="secondary" onClick={() => setScreen("quiz-create")}><Edit3 size={16} />Редактировать</Btn>
-          <Btn variant="secondary" onClick={() => setScreen("my-quizzes")}><Eye size={16} />Мои квизы</Btn>
-          <Btn onClick={() => setScreen("quiz-launch")}><Play size={16} />Запустить квиз</Btn>
+          <Btn variant="secondary" onClick={onEdit}><Edit3 size={16} />Редактировать</Btn>
+          <Btn variant="secondary" onClick={onOpenMyQuizzes}><Eye size={16} />Мои квизы</Btn>
+          <Btn onClick={onLaunch}><Play size={16} />Запустить квиз</Btn>
         </div>
 
         <Card className="w-full p-5">
@@ -975,8 +1261,8 @@ function QuizSavedScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
           <div className="flex gap-4 items-start">
             <img src="https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?w=120&h=80&fit=crop&auto=format" alt="Quiz cover" className="rounded-xl w-28 h-20 object-cover bg-[#f2f3f5]" />
             <div>
-              <p className="font-bold">История России XIX–XX вв.</p>
-              <p className="text-sm text-[#818c99] mt-1">20 вопросов · до 30 сек. на вопрос</p>
+              <p className="font-bold">{quiz?.title ?? "Новый квиз"}</p>
+              <p className="text-sm text-[#818c99] mt-1">{quiz?.questions.length ?? 0} вопросов · до {quiz?.defaultTimeSec ?? 30} сек. на вопрос</p>
             </div>
           </div>
         </Card>
@@ -987,9 +1273,40 @@ function QuizSavedScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
 
 // ─── 8. Quiz Launch (Organizer) ───────────────────────────────────────────────
 
-function QuizLaunchScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
+function QuizLaunchScreen({
+  setScreen,
+  quiz,
+  session,
+  onCreateSession,
+  onStartSession,
+}: {
+  setScreen: (s: Screen) => void;
+  quiz: QuizWithQuestions | null;
+  session: QuizSession | null;
+  quizId: string | null;
+  onCreateSession: () => Promise<void>;
+  onStartSession: () => Promise<void>;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const code = session?.code ?? "------";
   const [participants] = useState(["Мария К.", "Дмитрий В.", "Анна С.", "Пётр Л.", "Ольга М.", "Сергей Н."]);
-  const code = "847 293";
+
+  const handlePrimary = async () => {
+    setError("");
+    setLoading(true);
+    try {
+      if (!session) {
+        await onCreateSession();
+      } else {
+        await onStartSession();
+      }
+    } catch {
+      setError("Не удалось создать или запустить квиз");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#f2f3f5]">
@@ -998,12 +1315,13 @@ function QuizLaunchScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-xl font-bold">Запуск квиза</h2>
-            <p className="text-[#818c99] text-sm">«История России XIX–XX вв.»</p>
+            <p className="text-[#818c99] text-sm">«{quiz?.title ?? "Квиз"}»</p>
           </div>
-          <Btn onClick={() => setScreen("organizer-control")} size="lg">
-            <Play size={18} /> Начать квиз
+          <Btn onClick={handlePrimary} size="lg" disabled={loading}>
+            <Play size={18} /> {session ? (loading ? "Запуск…" : "Начать квиз") : (loading ? "Создаём…" : "Создать комнату")}
           </Btn>
         </div>
+        {error && <Card className="p-4 text-sm text-[#e64646]">{error}</Card>}
 
         <div className="grid md:grid-cols-2 gap-6">
           <Card className="p-6 flex flex-col items-center gap-4">
@@ -1052,7 +1370,17 @@ function QuizLaunchScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
 
 // ─── 9. Waiting Room ──────────────────────────────────────────────────────────
 
-function WaitingRoomScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
+function WaitingRoomScreen({
+  setScreen,
+  session,
+  participant,
+  quiz,
+}: {
+  setScreen: (s: Screen) => void;
+  session: QuizSession | null;
+  participant: SessionParticipant | null;
+  quiz: QuizWithQuestions | null;
+}) {
   const [dots, setDots] = useState(".");
   useEffect(() => {
     const t = setInterval(() => setDots(d => d.length >= 3 ? "." : d + "."), 600);
@@ -1066,19 +1394,19 @@ function WaitingRoomScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
           <BookOpen size={28} className="text-[#2787f5]" />
         </div>
         <div>
-          <h2 className="text-xl font-bold">История России XIX–XX вв.</h2>
-          <p className="text-[#818c99] text-sm mt-1">Организатор: Алексей Михайлов</p>
+          <h2 className="text-xl font-bold">{quiz?.title ?? "Квиз"}</h2>
+          <p className="text-[#818c99] text-sm mt-1">Организатор: {session ? session.hostId : "—"}</p>
         </div>
 
-        <Avatar name="Анна С" size={56} color="#4bb34b" />
+        <Avatar name={participant ? participant.userId : "Анна С"} size={56} color="#4bb34b" />
         <div>
-          <p className="font-semibold">Анна Сергеева</p>
+          <p className="font-semibold">{participant ? participant.userId : "Анна Сергеева"}</p>
           <p className="text-sm text-[#818c99]">Вы в комнате</p>
         </div>
 
         <div className="bg-[#f2f3f5] rounded-xl px-5 py-3 flex items-center gap-2">
           <Users size={16} className="text-[#818c99]" />
-          <span className="text-sm text-[#818c99]">6 участников подключено</span>
+          <span className="text-sm text-[#818c99]">{session ? `Комната ${session.code}` : "Ожидание комнаты"}</span>
         </div>
 
         <div className="flex flex-col items-center gap-2">
@@ -1102,144 +1430,158 @@ function WaitingRoomScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
 
 // ─── 10. Question ─────────────────────────────────────────────────────────────
 
-function QuestionScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
-  const [selected, setSelected] = useState<number | null>(null);
-  const [submitted, setSubmitted] = useState(false);
-  const [timeLeft, setTimeLeft] = useState(28);
+function QuestionScreen({
+  setScreen,
+  quiz,
+  session,
+  participant,
+  onSubmit,
+}: {
+  setScreen: (s: Screen) => void;
+  quiz: QuizWithQuestions | null;
+  session: QuizSession | null;
+  participant: SessionParticipant | null;
+  onSubmit: (payload: { questionId: string; selectedOptionIds: string[]; textAnswer?: string }) => Promise<void>;
+}) {
+  const question = quiz?.questions[session?.currentQuestionIndex ?? 0] ?? null;
+  const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
+  const [textAnswer, setTextAnswer] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [timeLeft, setTimeLeft] = useState(question?.timeSec ?? 30);
 
   useEffect(() => {
-    if (submitted || timeLeft <= 0) return;
-    const t = setInterval(() => setTimeLeft(x => x - 1), 1000);
-    return () => clearInterval(t);
-  }, [submitted, timeLeft]);
+    setSelectedOptionIds([]);
+    setTextAnswer("");
+    setTimeLeft(question?.timeSec ?? 30);
+  }, [question?.id, question?.timeSec]);
 
-  const progress = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
-  const answered = [true, true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false];
-  const results = [true, false, true];
+  useEffect(() => {
+    if (submitting || timeLeft <= 0) return;
+    const timer = setInterval(() => setTimeLeft((value) => value - 1), 1000);
+    return () => clearInterval(timer);
+  }, [submitting, timeLeft]);
 
-  const answers = ["Лев Толстой", "Фёдор Достоевский", "Иван Тургенев", "Антон Чехов"];
+  if (!quiz || !session || !participant || !question) {
+    return <div className="min-h-screen bg-[#f2f3f5] flex items-center justify-center text-[#818c99]">Вопрос недоступен</div>;
+  }
 
-  const pct = timeLeft / 30;
+  const progress = quiz.questions.map((_, index) => index);
+  const pct = question.timeSec > 0 ? timeLeft / question.timeSec : 0;
   const timerColor = pct > 0.5 ? GREEN : pct > 0.25 ? ORANGE : RED;
+  const isMultiple = question.type === "multiple";
+
+  const toggleOption = (optionId: string) => {
+    if (isMultiple) {
+      setSelectedOptionIds((current) => current.includes(optionId) ? current.filter((id) => id !== optionId) : [...current, optionId]);
+      return;
+    }
+
+    setSelectedOptionIds([optionId]);
+  };
+
+  const submit = async () => {
+    setSubmitting(true);
+    setError("");
+    try {
+      await onSubmit({
+        questionId: question.id,
+        selectedOptionIds: question.type === "text" ? [] : selectedOptionIds,
+        textAnswer: question.type === "text" ? textAnswer : undefined,
+      });
+      setScreen("answer-result");
+    } catch {
+      setError("Не удалось отправить ответ");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const displayOptions = question.type === "text" ? [] : question.options;
 
   return (
     <div className="min-h-screen bg-[#f2f3f5] flex flex-col">
-      {/* Top bar */}
       <div className="bg-white border-b border-[rgba(0,0,0,0.08)] px-4 py-3 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <span className="text-sm text-[#818c99]">История России</span>
-          <span className="text-xs bg-[#f2f3f5] px-2 py-0.5 rounded-full text-[#818c99]">Вопр. 4/20</span>
+          <span className="text-sm text-[#818c99]">{quiz.title}</span>
+          <span className="text-xs bg-[#f2f3f5] px-2 py-0.5 rounded-full text-[#818c99]">Вопр. {session.currentQuestionIndex + 1}/{quiz.questions.length}</span>
         </div>
         <div className="flex items-center gap-1.5">
           <Star size={15} style={{ color: ORANGE }} />
-          <span className="font-bold text-sm text-[#19191a]">1 240</span>
+          <span className="font-bold text-sm text-[#19191a]">{participant.score.toLocaleString()}</span>
         </div>
       </div>
 
       <div className="flex-1 max-w-2xl mx-auto w-full px-4 py-6 flex flex-col gap-5">
-        {/* Timer */}
         <div className="flex items-center justify-between">
           <div className="flex-1 h-2 bg-[#f2f3f5] rounded-full overflow-hidden mr-4">
-            <div
-              style={{ width: `${(timeLeft / 30) * 100}%`, backgroundColor: timerColor }}
-              className="h-full rounded-full transition-all duration-1000"
-            />
+            <div style={{ width: `${Math.max(0, (timeLeft / Math.max(question.timeSec, 1)) * 100)}%`, backgroundColor: timerColor }} className="h-full rounded-full transition-all duration-1000" />
           </div>
-          <div className="w-12 h-12 rounded-xl flex items-center justify-center font-bold text-lg flex-shrink-0"
-            style={{ backgroundColor: timerColor + "1a", color: timerColor }}>
+          <div className="w-12 h-12 rounded-xl flex items-center justify-center font-bold text-lg flex-shrink-0" style={{ backgroundColor: `${timerColor}1a`, color: timerColor }}>
             {timeLeft}
           </div>
         </div>
 
-        {/* Question */}
         <Card className="p-6">
-          <p className="text-lg font-semibold text-[#19191a]">Кто написал роман «Война и мир»?</p>
+          <p className="text-lg font-semibold text-[#19191a]">{question.text}</p>
         </Card>
 
-        {/* Answers */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {answers.map((a, i) => {
-            const isSelected = selected === i;
-            const showResult = submitted;
-            const isCorrect = i === 0;
-
-            let borderColor = "rgba(0,0,0,0.1)";
-            let bgColor = "#ffffff";
-            let labelBg = "#f2f3f5";
-            let labelColor = "#818c99";
-            let textColor = "#19191a";
-            let checkIcon: React.ReactNode = null;
-
-            if (!showResult && isSelected) {
-              borderColor = VK_BLUE; bgColor = "#eef5ff";
-              labelBg = VK_BLUE; labelColor = "#fff"; textColor = VK_BLUE;
-            }
-            if (showResult && isCorrect) {
-              borderColor = GREEN; bgColor = "#f0faf0";
-              labelBg = GREEN; labelColor = "#fff"; textColor = "#1f6b1f";
-              checkIcon = <Check size={14} style={{ color: GREEN }} />;
-            }
-            if (showResult && isSelected && !isCorrect) {
-              borderColor = RED; bgColor = "#fff5f5";
-              labelBg = RED; labelColor = "#fff"; textColor = "#c03030";
-              checkIcon = <X size={14} style={{ color: RED }} />;
-            }
-
-            return (
-              <button
-                key={i}
-                disabled={submitted}
-                onClick={() => setSelected(i)}
-                style={{ borderColor, backgroundColor: bgColor }}
-                className={`w-full px-4 py-4 rounded-2xl border-2 text-left transition-all duration-150 outline-none group
-                  ${!submitted && !isSelected ? "hover:border-[#2787f5] hover:bg-[#f5f9ff]" : ""}
-                  ${!submitted ? "active:scale-[0.99]" : ""}`}
-              >
-                <div className="flex items-center gap-3">
-                  <span
-                    style={{ backgroundColor: labelBg, color: labelColor }}
-                    className="w-8 h-8 rounded-xl flex items-center justify-center text-xs font-bold flex-shrink-0 transition-colors"
-                  >
-                    {checkIcon ?? ["A", "B", "C", "D"][i]}
-                  </span>
-                  <span className="font-medium text-sm leading-snug" style={{ color: textColor }}>{a}</span>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-
-        {!submitted && (
-          <Btn size="lg" className="w-full" disabled={selected === null} onClick={() => { setSubmitted(true); if (selected === 0) setTimeout(() => setScreen("answer-result"), 1800); }}>
-            Подтвердить ответ
-          </Btn>
-        )}
-
-        {submitted && (
-          <div className="flex items-center justify-center gap-2 py-3 text-sm text-[#818c99]">
-            <div className="w-2 h-2 rounded-full bg-[#2787f5] animate-pulse" />
-            Ожидание следующего вопроса…
+        {question.type === "text" ? (
+          <Card className="p-5">
+            <textarea
+              value={textAnswer}
+              onChange={(e) => setTextAnswer(e.target.value)}
+              placeholder="Введите ответ"
+              className="w-full min-h-28 px-4 py-3 rounded-xl border border-[rgba(0,0,0,0.12)] text-sm bg-white outline-none focus:ring-2 focus:ring-[#2787f5]/30 focus:border-[#2787f5]"
+            />
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {displayOptions.map((option, index) => {
+              const selected = selectedOptionIds.includes(option.id);
+              const label = String.fromCharCode(65 + index);
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={() => toggleOption(option.id)}
+                  style={{
+                    borderColor: selected ? VK_BLUE : "rgba(0,0,0,0.1)",
+                    backgroundColor: selected ? "#eef5ff" : "#ffffff",
+                  }}
+                  className="w-full px-4 py-4 rounded-2xl border-2 text-left transition-all duration-150 outline-none active:scale-[0.99]"
+                >
+                  <div className="flex items-center gap-3">
+                    <span style={{ backgroundColor: selected ? VK_BLUE : "#f2f3f5", color: selected ? "#fff" : "#818c99" }} className="w-8 h-8 rounded-xl flex items-center justify-center text-xs font-bold flex-shrink-0 transition-colors">
+                      {label}
+                    </span>
+                    <span className="font-medium text-sm leading-snug text-[#19191a]">{option.text}</span>
+                  </div>
+                </button>
+              );
+            })}
           </div>
         )}
 
-        {/* Progress panel */}
+        {error && <p className="text-sm text-[#e64646]">{error}</p>}
+
+        <Btn size="lg" className="w-full" disabled={submitting || (question.type === "text" ? !textAnswer.trim() : selectedOptionIds.length === 0)} onClick={submit}>
+          {submitting ? "Отправляем…" : "Подтвердить ответ"}
+        </Btn>
+
         <Card className="p-4">
           <p className="text-xs text-[#818c99] mb-3 font-medium">Прогресс</p>
           <div className="flex flex-wrap gap-1.5">
-            {progress.map(i => {
-              const isCurrent = i === 3;
-              const isDone = answered[i];
-              const isCorrectDone = isDone && results[i] === true;
-              const isWrongDone = isDone && results[i] === false;
-
+            {progress.map((index) => {
+              const isCurrent = index === session.currentQuestionIndex;
+              const isDone = index < session.currentQuestionIndex;
               let style: React.CSSProperties = { backgroundColor: "#e8edf3", color: "#818c99" };
               if (isCurrent) style = { backgroundColor: VK_BLUE, color: "white" };
-              else if (isCorrectDone) style = { backgroundColor: GREEN, color: "white" };
-              else if (isWrongDone) style = { backgroundColor: RED, color: "white" };
+              else if (isDone) style = { backgroundColor: GREEN, color: "white" };
 
               return (
-                <div key={i} style={style} className="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-semibold">
-                  {i + 1}
+                <div key={index} style={style} className="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-semibold">
+                  {index + 1}
                 </div>
               );
             })}
@@ -1252,8 +1594,33 @@ function QuestionScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
 
 // ─── 11. Answer Result ────────────────────────────────────────────────────────
 
-function AnswerResultScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
-  const correct = true;
+function AnswerResultScreen({
+  setScreen,
+  quiz,
+  session,
+  latestAnswer,
+  onNextQuestion,
+}: {
+  setScreen: (s: Screen) => void;
+  quiz: QuizWithQuestions | null;
+  session: QuizSession | null;
+  latestAnswer: {
+    isCorrect: boolean;
+    pointsAwarded: number;
+    totalScore: number;
+    rank: number;
+    questionText: string;
+    correctAnswerText: string;
+    answeredText: string;
+  } | null;
+  onNextQuestion: () => Promise<void>;
+}) {
+  if (!latestAnswer) {
+    return <div className="min-h-screen bg-[#f2f3f5] flex items-center justify-center text-[#818c99]">Нет результата ответа</div>;
+  }
+
+  const correct = latestAnswer.isCorrect;
+
   return (
     <div className="min-h-screen bg-[#f2f3f5] flex items-center justify-center p-4">
       <div className="w-full max-w-sm flex flex-col gap-5">
@@ -1263,22 +1630,22 @@ function AnswerResultScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
           </div>
           <div>
             <p className="text-2xl font-bold" style={{ color: correct ? GREEN : RED }}>{correct ? "Верно!" : "Неверно"}</p>
-            <p className="text-[#818c99] text-sm mt-1">Правильный ответ: <strong className="text-[#19191a]">Лев Толстой</strong></p>
+            <p className="text-[#818c99] text-sm mt-1">Правильный ответ: <strong className="text-[#19191a]">{latestAnswer.correctAnswerText}</strong></p>
           </div>
 
           <div className="w-full flex flex-col items-center gap-2 pt-2">
             <div className="flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-semibold" style={{ backgroundColor: ORANGE + "1a", color: ORANGE }}>
-              +120 баллов за вопрос
+              +{latestAnswer.pointsAwarded} баллов за вопрос
             </div>
             <div className="bg-[#f2f3f5] rounded-2xl w-full py-4 flex flex-col items-center gap-0.5">
-              <p className="text-3xl font-bold text-[#19191a]">1 390</p>
+              <p className="text-3xl font-bold text-[#19191a]">{latestAnswer.totalScore.toLocaleString()}</p>
               <p className="text-xs text-[#818c99]">Итого за квиз</p>
             </div>
           </div>
 
           <div className="flex items-center gap-2 bg-[#f2f3f5] rounded-xl px-4 py-2.5 w-full">
             <Trophy size={16} style={{ color: ORANGE }} />
-            <span className="text-sm">Ваше место: <strong>#3</strong> из 6</span>
+            <span className="text-sm">Ваше место: <strong>#{latestAnswer.rank}</strong></span>
           </div>
         </Card>
 
@@ -1287,7 +1654,9 @@ function AnswerResultScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
           Ожидание следующего вопроса…
         </div>
 
-        <Btn variant="secondary" onClick={() => setScreen("question")} className="w-full">Следующий вопрос</Btn>
+        <Btn variant="secondary" onClick={onNextQuestion} className="w-full">
+          {session && quiz && session.currentQuestionIndex + 1 >= quiz.questions.length ? "Завершить" : "Следующий вопрос"}
+        </Btn>
       </div>
     </div>
   );
@@ -1295,12 +1664,69 @@ function AnswerResultScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
 
 // ─── 12. Organizer Control ────────────────────────────────────────────────────
 
-function OrganizerControlScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
+function OrganizerControlScreen({
+  setScreen,
+  session,
+  quiz,
+}: {
+  setScreen: (s: Screen) => void;
+  session: QuizSession | null;
+  quiz: QuizWithQuestions | null;
+}) {
   const [timeLeft, setTimeLeft] = useState(18);
+  const [participants, setParticipants] = useState<SessionParticipant[]>([]);
+  const [participantRows, setParticipantRows] = useState<SessionParticipant[]>([]);
+  const [loading, setLoading] = useState(true);
+
   useEffect(() => {
     const t = setInterval(() => setTimeLeft(x => Math.max(0, x - 1)), 1000);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    if (!session) {
+      setLoading(false);
+      return;
+    }
+
+    let alive = true;
+
+    const load = async () => {
+      try {
+        setLoading(true);
+        const data = await getParticipants(session.id);
+        if (!alive) return;
+        const rows = data.map((participant) => ({
+          id: participant.id,
+          sessionId: participant.sessionId,
+          userId: participant.userId,
+          score: participant.score,
+          status: participant.status,
+          joinedAt: participant.joinedAt,
+          finishedAt: participant.finishedAt,
+        }));
+        setParticipants(rows);
+        setParticipantRows(rows);
+      } catch {
+        if (alive) {
+          setParticipants([]);
+          setParticipantRows([]);
+        }
+      } finally {
+        if (alive) setLoading(false);
+      }
+    };
+
+    void load();
+    const unsubscribe = subscribeToSession(session.id, () => {
+      void load();
+    });
+
+    return () => {
+      alive = false;
+      unsubscribe();
+    };
+  }, [session]);
 
   const distribution = [
     { label: "Лев Толстой", count: 4, pct: 67, correct: true },
@@ -1309,11 +1735,7 @@ function OrganizerControlScreen({ setScreen }: { setScreen: (s: Screen) => void 
     { label: "Чехов", count: 0, pct: 0, correct: false },
   ];
 
-  const leaderboard = [
-    { name: "Мария К.", score: 1840 }, { name: "Дмитрий В.", score: 1720 },
-    { name: "Анна С.", score: 1390 }, { name: "Пётр Л.", score: 1200 },
-    { name: "Ольга М.", score: 980 }, { name: "Сергей Н.", score: 760 },
-  ];
+  const leaderboard = participantRows;
 
   return (
     <div className="min-h-screen bg-[#f2f3f5]">
@@ -1322,7 +1744,7 @@ function OrganizerControlScreen({ setScreen }: { setScreen: (s: Screen) => void 
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
             <h2 className="font-bold text-lg">Управление квизом</h2>
-            <p className="text-[#818c99] text-sm">Вопрос 4 / 20 · 6 участников</p>
+            <p className="text-[#818c99] text-sm">{quiz?.title ?? "Квиз"} · {participants.length || 0} участников</p>
           </div>
           <div className="flex gap-2">
             <Btn variant="secondary" onClick={() => setScreen("leaderboard-mid")}>Таблица</Btn>
@@ -1347,11 +1769,11 @@ function OrganizerControlScreen({ setScreen }: { setScreen: (s: Screen) => void 
 
               <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
                 <div className="bg-[#d6f5d6] rounded-xl p-3 text-center">
-                  <p className="text-2xl font-bold" style={{ color: GREEN }}>4</p>
+                  <p className="text-2xl font-bold" style={{ color: GREEN }}>{participants.filter((p) => p.status !== "joined").length}</p>
                   <p className="text-[#2a7a2a]">Ответили</p>
                 </div>
                 <div className="bg-[#ffeaea] rounded-xl p-3 text-center">
-                  <p className="text-2xl font-bold" style={{ color: RED }}>2</p>
+                  <p className="text-2xl font-bold" style={{ color: RED }}>{Math.max(0, 6 - participants.length)}</p>
                   <p className="text-[#c03030]">Не ответили</p>
                 </div>
               </div>
@@ -1381,11 +1803,12 @@ function OrganizerControlScreen({ setScreen }: { setScreen: (s: Screen) => void 
           <Card className="p-5">
             <p className="font-semibold text-sm mb-4">Лидерборд</p>
             <div className="flex flex-col gap-2">
-              {leaderboard.map((p, i) => (
+              {loading && <p className="text-sm text-[#818c99]">Загрузка участников…</p>}
+              {!loading && leaderboard.map((p, i) => (
                 <div key={i} className="flex items-center gap-2.5">
                   <span className="w-5 text-xs font-bold text-center" style={{ color: i < 3 ? ORANGE : "#818c99" }}>#{i + 1}</span>
-                  <Avatar name={p.name} size={28} color={["#2787f5", "#4bb34b", "#ff9e00", "#6c7fa6", "#e64646", "#19191a"][i]} />
-                  <span className="text-sm flex-1 truncate">{p.name}</span>
+                  <Avatar name={p.userId} size={28} color={["#2787f5", "#4bb34b", "#ff9e00", "#6c7fa6", "#e64646", "#19191a"][i]} />
+                  <span className="text-sm flex-1 truncate">{p.userId}</span>
                   <span className="text-xs font-bold text-[#19191a]">{p.score.toLocaleString()}</span>
                 </div>
               ))}
@@ -1399,14 +1822,36 @@ function OrganizerControlScreen({ setScreen }: { setScreen: (s: Screen) => void 
 
 // ─── 13. Intermediate Leaderboard ─────────────────────────────────────────────
 
-function LeaderboardMidScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
-  const players = [
-    { name: "Мария К.", score: 1840, change: 1, avatar: "#2787f5" },
-    { name: "Дмитрий В.", score: 1720, change: -1, avatar: "#4bb34b" },
-    { name: "Анна С.", score: 1390, change: 0, avatar: "#ff9e00", isMe: true },
-    { name: "Пётр Л.", score: 1200, change: 2, avatar: "#6c7fa6" },
-    { name: "Ольга М.", score: 980, change: -1, avatar: "#e64646" },
-    { name: "Сергей Н.", score: 760, change: -1, avatar: "#19191a" },
+function LeaderboardMidScreen({
+  setScreen,
+  session,
+  participants,
+}: {
+  setScreen: (s: Screen) => void;
+  session: QuizSession | null;
+  participants: ParticipantDTO[];
+}) {
+  const [players, setPlayers] = useState<ParticipantDTO[]>(participants);
+
+  useEffect(() => {
+    let alive = true;
+    async function load() {
+      if (!session) return;
+      const data = await getParticipants(session.id).catch(() => []);
+      if (alive) setPlayers(data);
+    }
+
+    void load();
+    return () => { alive = false; };
+  }, [session]);
+
+  useEffect(() => {
+    setPlayers(participants);
+  }, [participants]);
+
+  const playersFallback: ParticipantDTO[] = [
+    { id: "1", sessionId: "", userId: "Мария К.", name: "Мария К.", score: 1840, rank: 1, status: "playing", joinedAt: new Date().toISOString() },
+    { id: "2", sessionId: "", userId: "Дмитрий В.", name: "Дмитрий В.", score: 1720, rank: 2, status: "playing", joinedAt: new Date().toISOString() },
   ];
 
   return (
@@ -1418,16 +1863,16 @@ function LeaderboardMidScreen({ setScreen }: { setScreen: (s: Screen) => void })
         </div>
         <Card className="overflow-hidden">
           <div className="divide-y divide-[rgba(0,0,0,0.05)]">
-            {players.map((p, i) => (
-              <div key={i} className={`flex items-center gap-3 px-5 py-3.5 ${p.isMe ? "bg-[#d6e8ff]" : ""}`}>
+            {(players.length > 0 ? players : playersFallback).map((p, i) => (
+              <div key={p.id} className="flex items-center gap-3 px-5 py-3.5">
                 <span className="w-6 text-sm font-bold text-center" style={{ color: i < 3 ? ORANGE : "#818c99" }}>
                   {i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `#${i + 1}`}
                 </span>
-                <Avatar name={p.name} size={36} color={p.avatar} />
-                <span className="flex-1 text-sm font-medium">{p.name}{p.isMe && <span className="ml-2 text-xs text-[#2787f5] font-semibold">Вы</span>}</span>
+                <Avatar name={p.name} size={36} color={i % 2 === 0 ? "#2787f5" : "#4bb34b"} />
+                <span className="flex-1 text-sm font-medium">{p.name}</span>
                 <span className="text-sm font-bold">{p.score.toLocaleString()}</span>
                 <span className="w-6 flex items-center justify-center">
-                  {p.change > 0 ? <ArrowUp size={14} style={{ color: GREEN }} /> : p.change < 0 ? <ArrowDown size={14} style={{ color: RED }} /> : <Minus size={14} className="text-[#c4c8cc]" />}
+                  {i === 0 ? <ArrowUp size={14} style={{ color: GREEN }} /> : i === players.length - 1 ? <ArrowDown size={14} style={{ color: RED }} /> : <Minus size={14} className="text-[#c4c8cc]" />}
                 </span>
               </div>
             ))}
@@ -1441,17 +1886,42 @@ function LeaderboardMidScreen({ setScreen }: { setScreen: (s: Screen) => void })
 
 // ─── 14. Final Leaderboard ────────────────────────────────────────────────────
 
-function LeaderboardFinalScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
-  const podium = [
-    { name: "Мария К.", score: 3840, pct: 95, correct: 19, streak: 12, avatar: "#2787f5" },
-    { name: "Дмитрий В.", score: 3620, pct: 90, correct: 18, streak: 9, avatar: "#4bb34b" },
-    { name: "Пётр Л.", score: 2900, pct: 80, correct: 16, streak: 7, avatar: "#6c7fa6" },
+function LeaderboardFinalScreen({
+  setScreen,
+  session,
+  quiz,
+  participants,
+}: {
+  setScreen: (s: Screen) => void;
+  session: QuizSession | null;
+  quiz: QuizWithQuestions | null;
+  participants: ParticipantDTO[];
+}) {
+  const [rows, setRows] = useState<ParticipantDTO[]>(participants);
+
+  useEffect(() => {
+    let alive = true;
+    async function load() {
+      if (!session) return;
+      const data = await getParticipants(session.id).catch(() => []);
+      if (alive) setRows(data);
+    }
+
+    void load();
+    return () => { alive = false; };
+  }, [session]);
+
+  useEffect(() => {
+    setRows(participants);
+  }, [participants]);
+
+  const sorted = [...rows].sort((a, b) => b.score - a.score);
+  const podium = sorted.slice(0, 3).length > 0 ? sorted.slice(0, 3) : [
+    { id: "1", sessionId: "", userId: "Мария К.", name: "Мария К.", score: 3840, rank: 1, status: "finished", joinedAt: new Date().toISOString() },
+    { id: "2", sessionId: "", userId: "Дмитрий В.", name: "Дмитрий В.", score: 3620, rank: 2, status: "finished", joinedAt: new Date().toISOString() },
+    { id: "3", sessionId: "", userId: "Пётр Л.", name: "Пётр Л.", score: 2900, rank: 3, status: "finished", joinedAt: new Date().toISOString() },
   ];
-  const rest = [
-    { name: "Анна С.", score: 2640, pct: 75, correct: 15, streak: 5 },
-    { name: "Ольга М.", score: 1980, pct: 60, correct: 12, streak: 3 },
-    { name: "Сергей Н.", score: 1460, pct: 45, correct: 9, streak: 2 },
-  ];
+  const rest = sorted.slice(3);
 
   return (
     <div className="min-h-screen bg-[#f2f3f5]">
@@ -1460,17 +1930,17 @@ function LeaderboardFinalScreen({ setScreen }: { setScreen: (s: Screen) => void 
         <div className="text-center">
           <Trophy size={40} style={{ color: ORANGE }} className="mx-auto mb-2" />
           <h2 className="text-2xl font-bold">Финальный результат</h2>
-          <p className="text-[#818c99] text-sm">«История России XIX–XX вв.»</p>
+          <p className="text-[#818c99] text-sm">«{quiz?.title ?? "Квиз"}»</p>
         </div>
 
         {/* Podium */}
         <div className="grid grid-cols-3 gap-3 items-end">
-          {[podium[1], podium[0], podium[2]].map((p, i) => {
+          {[podium[1], podium[0], podium[2]].filter(Boolean).map((p, i) => {
             const heights = ["h-28", "h-36", "h-24"];
             const medals = ["🥈", "🥇", "🥉"];
             return (
               <div key={i} className="flex flex-col items-center gap-2">
-                <Avatar name={p.name} size={48} color={p.avatar} />
+                <Avatar name={p.name} size={48} color={["#2787f5", "#4bb34b", "#6c7fa6"][i]} />
                 <p className="text-xs font-semibold text-center">{p.name}</p>
                 <p className="text-sm font-bold">{p.score.toLocaleString()}</p>
                 <div style={{ backgroundColor: [VK_BLUE + "20", ORANGE + "20", "#6c7fa6" + "20"][i] }}
@@ -1488,16 +1958,16 @@ function LeaderboardFinalScreen({ setScreen }: { setScreen: (s: Screen) => void 
             <p className="text-sm font-semibold text-[#818c99]">Полная таблица</p>
           </div>
           <div className="divide-y divide-[rgba(0,0,0,0.05)]">
-            {[...podium.map((p, i) => ({ ...p, pos: i + 1 })), ...rest.map((p, i) => ({ ...p, pos: i + 4, avatar: "#818c99" }))].map((p, i) => (
+            {[...podium.map((p, i) => ({ ...p, pos: i + 1 })), ...rest.map((p, i) => ({ ...p, pos: i + 4 }))].map((p, i) => (
               <div key={i} className="grid grid-cols-6 items-center px-5 py-3 gap-3 text-sm">
                 <span className="font-bold" style={{ color: p.pos <= 3 ? ORANGE : "#818c99" }}>#{p.pos}</span>
                 <div className="col-span-2 flex items-center gap-2">
-                  <Avatar name={p.name} size={28} color={p.avatar} />
+                  <Avatar name={p.name} size={28} color={p.pos <= 3 ? ["#2787f5", "#4bb34b", "#6c7fa6"][p.pos - 1] : "#818c99"} />
                   <span className="truncate font-medium">{p.name}</span>
                 </div>
                 <span className="font-bold text-right">{p.score.toLocaleString()}</span>
-                <span className="text-center text-[#818c99]">{p.correct}/20</span>
-                <span className="text-right" style={{ color: p.pct >= 80 ? GREEN : p.pct >= 60 ? ORANGE : RED }}>{p.pct}%</span>
+                <span className="text-center text-[#818c99]">{p.score}</span>
+                <span className="text-right" style={{ color: GREEN }}>{p.rank}</span>
               </div>
             ))}
           </div>
@@ -1514,14 +1984,47 @@ function LeaderboardFinalScreen({ setScreen }: { setScreen: (s: Screen) => void 
 
 // ─── 15. Result Details ───────────────────────────────────────────────────────
 
-function ResultDetailsScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
-  const questions = [
-    { text: "Кто написал «Войну и мир»?", yours: "Лев Толстой", correct: "Лев Толстой", points: 120, ok: true },
-    { text: "В каком году началась Первая мировая война?", yours: "1915", correct: "1914", points: 0, ok: false },
-    { text: "Кто правил во время Октябрьской революции?", yours: "Ленин", correct: "Ленин", points: 100, ok: true },
-    { text: "Когда закончилась Вторая мировая война?", yours: "1945", correct: "1945", points: 110, ok: true },
-    { text: "Столица Российской империи в XIX веке?", yours: "Москва", correct: "Санкт-Петербург", points: 0, ok: false },
-  ];
+function ResultDetailsScreen({
+  setScreen,
+  session,
+  participant,
+}: {
+  setScreen: (s: Screen) => void;
+  session: QuizSession | null;
+  participant: SessionParticipant | null;
+}) {
+  const [details, setDetails] = useState<ParticipantAnswerDetail[]>([]);
+  const [rank, setRank] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function load() {
+      if (!participant) {
+        setLoading(false);
+        return;
+      }
+
+      try {
+        setLoading(true);
+        const data = await getParticipantAnswers(participant.id);
+        if (alive) setDetails(data);
+        if (session) {
+          const participantsList = await getParticipants(session.id).catch(() => []);
+          const current = participantsList.find((item) => item.id === participant.id);
+          if (alive) setRank(current?.rank ?? null);
+        }
+      } catch {
+        if (alive) setDetails([]);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    }
+
+    void load();
+    return () => { alive = false; };
+  }, [participant]);
 
   return (
     <div className="min-h-screen bg-[#f2f3f5]">
@@ -1536,9 +2039,9 @@ function ResultDetailsScreen({ setScreen }: { setScreen: (s: Screen) => void }) 
 
         <Card className="p-5 grid grid-cols-3 gap-4 text-center">
           {[
-            { label: "Итоговый балл", val: "2 640", color: VK_BLUE },
-            { label: "Место", val: "#4", color: ORANGE },
-            { label: "Верных", val: "15/20", color: GREEN },
+            { label: "Итоговый балл", val: participant?.score.toLocaleString() ?? "—", color: VK_BLUE },
+            { label: "Место", val: rank ? `#${rank}` : "—", color: ORANGE },
+            { label: "Верных", val: `${details.filter((item) => item.isCorrect).length}/${details.length || 0}`, color: GREEN },
           ].map((s, i) => (
             <div key={i}>
               <p className="text-2xl font-bold" style={{ color: s.color }}>{s.val}</p>
@@ -1550,16 +2053,17 @@ function ResultDetailsScreen({ setScreen }: { setScreen: (s: Screen) => void }) 
         <h3 className="section-title text-[#818c99]">Вопрос за вопросом</h3>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {questions.map((q, i) => (
+          {loading && <Card className="p-6 text-sm text-[#818c99]">Загрузка деталей…</Card>}
+          {!loading && details.map((q, i) => (
             <Card key={i} className="px-5 py-4 flex flex-col gap-3">
               {/* Статус */}
               <div className="flex items-center gap-2">
                 <div className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0"
-                  style={{ backgroundColor: q.ok ? GREEN + "1a" : RED + "1a" }}>
-                  {q.ok ? <Check size={12} style={{ color: GREEN }} /> : <X size={12} style={{ color: RED }} />}
+                  style={{ backgroundColor: q.isCorrect ? GREEN + "1a" : RED + "1a" }}>
+                  {q.isCorrect ? <Check size={12} style={{ color: GREEN }} /> : <X size={12} style={{ color: RED }} />}
                 </div>
-                <span className="text-xs font-semibold" style={{ color: q.ok ? GREEN : RED }}>
-                  {q.ok ? "Верно" : "Неверно"}
+                <span className="text-xs font-semibold" style={{ color: q.isCorrect ? GREEN : RED }}>
+                  {q.isCorrect ? "Верно" : "Неверно"}
                 </span>
               </div>
 
@@ -1570,18 +2074,18 @@ function ResultDetailsScreen({ setScreen }: { setScreen: (s: Screen) => void }) 
               <div className="grid grid-cols-2 gap-2 pt-2 border-t border-[rgba(0,0,0,0.05)]">
                 <div>
                   <p className="text-caption mb-0.5">Ваш ответ</p>
-                  <p className="text-sm font-semibold" style={{ color: q.ok ? GREEN : RED }}>{q.yours}</p>
+                  <p className="text-sm font-semibold" style={{ color: q.isCorrect ? GREEN : RED }}>{q.textAnswer ?? "—"}</p>
                 </div>
                 <div>
                   <p className="text-caption mb-0.5">Верный ответ</p>
-                  <p className="text-sm font-semibold" style={{ color: GREEN }}>{q.correct}</p>
+                  <p className="text-sm font-semibold" style={{ color: GREEN }}>{q.correctAnswerText}</p>
                 </div>
               </div>
 
               {/* Баллы по центру */}
               <div className="text-center pt-1 border-t border-[rgba(0,0,0,0.05)]">
-                <p className="text-base font-bold" style={{ color: q.ok ? ORANGE : "#c4c8cc" }}>
-                  +{q.points} б.
+                <p className="text-base font-bold" style={{ color: q.isCorrect ? ORANGE : "#c4c8cc" }}>
+                  +{q.pointsAwarded} б.
                 </p>
               </div>
             </Card>
@@ -1596,7 +2100,17 @@ function ResultDetailsScreen({ setScreen }: { setScreen: (s: Screen) => void }) 
 
 // ─── 16. Analytics ────────────────────────────────────────────────────────────
 
-function AnalyticsScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
+function AnalyticsScreen({
+  setScreen,
+  quiz,
+  participants,
+  session,
+}: {
+  setScreen: (s: Screen) => void;
+  quiz: QuizWithQuestions | null;
+  participants: ParticipantDTO[];
+  session: QuizSession | null;
+}) {
   const hardQ = [
     { text: "В каком году началась Первая мировая война?", wrong: 78 },
     { text: "Столица Российской империи в XIX веке?", wrong: 67 },
@@ -1617,7 +2131,7 @@ function AnalyticsScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="font-bold text-xl">Аналитика</h2>
-            <p className="text-[#818c99] text-sm">«История России XIX–XX вв.» · 22 июля 2026</p>
+            <p className="text-[#818c99] text-sm">«{quiz?.title ?? "Квиз"}» · {session ? new Date(session.createdAt).toLocaleDateString("ru-RU") : "—"}</p>
           </div>
           <Btn variant="secondary"><Download size={15} /> Экспорт</Btn>
         </div>
@@ -1625,10 +2139,10 @@ function AnalyticsScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
         {/* KPIs */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
-            { label: "Участников", val: "6", icon: Users, color: VK_BLUE },
-            { label: "Средний балл", val: "2 105", icon: Star, color: ORANGE },
-            { label: "Верных ответов", val: "75%", icon: Check, color: GREEN },
-            { label: "Завершили квиз", val: "100%", icon: TrendingUp, color: VK_BLUE },
+            { label: "Участников", val: String(participants.length), icon: Users, color: VK_BLUE },
+            { label: "Средний балл", val: participants.length > 0 ? Math.round(participants.reduce((sum, item) => sum + item.score, 0) / participants.length).toLocaleString() : "0", icon: Star, color: ORANGE },
+            { label: "Верных ответов", val: "—", icon: Check, color: GREEN },
+            { label: "Завершили квиз", val: participants.length > 0 ? `${Math.round((participants.filter((item) => item.status === "finished").length / participants.length) * 100)}%` : "0%", icon: TrendingUp, color: VK_BLUE },
           ].map((k, i) => (
             <Card key={i} className="px-5 py-4 flex items-center gap-4">
               <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ backgroundColor: k.color + "1a" }}>
@@ -1731,88 +2245,299 @@ function AnalyticsScreen({ setScreen }: { setScreen: (s: Screen) => void }) {
   );
 }
 
-// ─── Screen Nav Demo Panel ────────────────────────────────────────────────────
-
-const SCREENS: { id: Screen; label: string }[] = [
-  { id: "login", label: "1. Вход" },
-  { id: "register", label: "2. Регистрация" },
-  { id: "dashboard", label: "3. Главная" },
-  { id: "profile", label: "4. Профиль" },
-  { id: "my-quizzes", label: "5. Мои квизы" },
-  { id: "quiz-create", label: "6. Создание" },
-  { id: "quiz-saved", label: "7. Сохранён" },
-  { id: "quiz-launch", label: "8. Запуск" },
-  { id: "waiting-room", label: "9. Ожидание" },
-  { id: "question", label: "10. Вопрос" },
-  { id: "answer-result", label: "11. Результат" },
-  { id: "organizer-control", label: "12. Контроль" },
-  { id: "leaderboard-mid", label: "13. Промеж." },
-  { id: "leaderboard-final", label: "14. Финал" },
-  { id: "result-details", label: "15. Детали" },
-  { id: "analytics", label: "16. Аналитика" },
-];
-
-function ScreenPicker({ current, onChange }: { current: Screen; onChange: (s: Screen) => void }) {
-  const [open, setOpen] = useState(false);
-  const currentLabel = SCREENS.find(s => s.id === current)?.label ?? current;
-
-  return (
-    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50" style={{ maxWidth: "calc(100vw - 32px)" }}>
-      {open && (
-        <div className="bg-white rounded-2xl shadow-[0_8px_40px_rgba(0,0,0,0.18)] p-3 mb-2 grid grid-cols-4 gap-1.5 w-[520px] max-w-[calc(100vw-32px)]">
-          {SCREENS.map(s => (
-            <button
-              key={s.id}
-              onClick={() => { onChange(s.id); setOpen(false); }}
-              className={`px-2.5 py-2 rounded-xl text-xs font-medium text-left transition-colors ${current === s.id ? "bg-[#2787f5] text-white" : "hover:bg-[#f2f3f5] text-[#19191a]"}`}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
-      )}
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 px-4 py-2.5 bg-[#19191a] text-white text-sm font-medium rounded-full shadow-lg hover:bg-[#2c2c2c] transition-colors mx-auto"
-      >
-        <BookOpen size={15} />
-        {currentLabel}
-        <ChevronRight size={14} className={`transition-transform ${open ? "rotate-90" : ""}`} />
-      </button>
-    </div>
-  );
-}
-
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [screen, setScreen] = useState<Screen>("dashboard");
+  const [screen, setScreen] = useState<Screen>("login");
+  const [booting, setBooting] = useState(true);
+  const [authUser, setAuthUser] = useState<UserProfile | null>(null);
+  const [activeQuizId, setActiveQuizId] = useState<string | null>(null);
+  const [activeQuiz, setActiveQuiz] = useState<QuizWithQuestions | null>(null);
+  const [activeSession, setActiveSession] = useState<QuizSession | null>(null);
+  const [activeParticipant, setActiveParticipant] = useState<SessionParticipant | null>(null);
+  const [latestAnswer, setLatestAnswer] = useState<{
+    isCorrect: boolean;
+    pointsAwarded: number;
+    totalScore: number;
+    rank: number;
+    questionText: string;
+    correctAnswerText: string;
+    answeredText: string;
+  } | null>(null);
+  const [participants, setParticipants] = useState<ParticipantDTO[]>([]);
+  const [participantAnswers, setParticipantAnswers] = useState<ParticipantAnswerDetail[]>([]);
+  const [loginError, setLoginError] = useState("");
+  const [registerError, setRegisterError] = useState("");
+  const [registerSuccess, setRegisterSuccess] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [registerLoading, setRegisterLoading] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function initAuth() {
+      try {
+        const currentUser = await getCurrentUser();
+        if (!alive) return;
+
+        if (!currentUser) {
+          setAuthUser(null);
+          setScreen("login");
+          return;
+        }
+
+        const profile = await getMe().catch(() => null);
+        if (!alive) return;
+
+        setAuthUser(profile ?? null);
+        setScreen("dashboard");
+      } catch {
+        if (!alive) return;
+        setAuthUser(null);
+        setScreen("login");
+      } finally {
+        if (alive) setBooting(false);
+      }
+    }
+
+    void initAuth();
+
+    const { data: subscription } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (!alive) return;
+
+      if (!session?.user) {
+        setAuthUser(null);
+        setScreen("login");
+        return;
+      }
+
+      const profile = await getMe().catch(() => null);
+      if (!alive) return;
+
+      setAuthUser(profile ?? null);
+      setScreen("dashboard");
+    });
+
+    return () => {
+      alive = false;
+      subscription.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!booting && !authUser && isProtectedScreen(screen)) {
+      setScreen("login");
+    }
+  }, [authUser, booting, screen]);
+
+  const handleLogin = async (email: string, password: string) => {
+    setLoginLoading(true);
+    setLoginError("");
+
+    try {
+      await login(email, password);
+      const profile = await getMe().catch(() => null);
+      setAuthUser(profile ?? null);
+      setScreen("dashboard");
+    } catch (error) {
+      setLoginError(getAuthErrorMessage(error, "Не удалось выполнить вход. Попробуйте ещё раз."));
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleRegister = async (name: string, email: string, password: string) => {
+    setRegisterLoading(true);
+    setRegisterError("");
+    setRegisterSuccess("");
+
+    try {
+      const result = await register(name, email, password);
+      const session = result?.session;
+
+      if (session) {
+        const profile = await getMe().catch(() => null);
+        setAuthUser(profile ?? null);
+        setScreen("dashboard");
+        return;
+      }
+
+      setRegisterSuccess("Аккаунт создан. Теперь войдите в систему.");
+      setScreen("login");
+    } catch (error) {
+      setRegisterError(getAuthErrorMessage(error, "Не удалось создать аккаунт. Попробуйте ещё раз."));
+    } finally {
+      setRegisterLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await logout();
+    setAuthUser(null);
+    setActiveQuizId(null);
+    setActiveQuiz(null);
+    setActiveSession(null);
+    setActiveParticipant(null);
+    setLatestAnswer(null);
+    setParticipants([]);
+    setParticipantAnswers([]);
+    setScreen("login");
+  };
+
+  const handleOpenQuiz = (quizId?: string) => {
+    setActiveQuizId(quizId ?? null);
+    setActiveSession(null);
+    setActiveParticipant(null);
+    setLatestAnswer(null);
+    setParticipantAnswers([]);
+    if (!quizId) {
+      setActiveQuiz(null);
+    }
+    setScreen("quiz-create");
+  };
+
+  const handleJoinSession = async (code: string) => {
+    const result = await joinSession(code);
+    setActiveSession(result.session);
+    setActiveParticipant(result.participant);
+    setActiveQuizId(result.session.quizId);
+    const quiz = await getQuiz(result.session.quizId).catch(() => null);
+    setActiveQuiz(quiz);
+    setLatestAnswer(null);
+    setParticipantAnswers([]);
+    setScreen("waiting-room");
+  };
+
+  const handleCreateSession = async () => {
+    if (!activeQuizId) {
+      throw new Error("No quiz selected");
+    }
+
+    const session = await createSession(activeQuizId);
+    setActiveSession(session);
+    setActiveParticipant(null);
+    setScreen("quiz-launch");
+  };
+
+  const handleStartSession = async () => {
+    if (!activeSession) {
+      throw new Error("No active session");
+    }
+
+    await startSession(activeSession.id);
+    setScreen("organizer-control");
+  };
+
+  const refreshParticipants = async (sessionId: string) => {
+    const currentParticipants = await getParticipants(sessionId);
+    setParticipants(currentParticipants);
+    return currentParticipants;
+  };
+
+  const handleSubmitAnswer = async (payload: {
+    questionId: string;
+    selectedOptionIds: string[];
+    textAnswer?: string;
+  }) => {
+    if (!activeParticipant || !activeQuiz || !activeSession) {
+      throw new Error("No active quiz session");
+    }
+
+    const result = await submitAnswer(
+      activeParticipant.id,
+      payload.questionId,
+      payload.selectedOptionIds,
+      payload.textAnswer,
+    );
+
+    const question = activeQuiz.questions.find((item) => item.id === payload.questionId);
+    const selectedLabels = question
+      ? question.options.filter((option) => payload.selectedOptionIds.includes(option.id)).map((option) => option.text)
+      : [];
+
+    setLatestAnswer({
+      isCorrect: result.isCorrect,
+      pointsAwarded: result.pointsAwarded,
+      totalScore: result.totalScore,
+      rank: result.rank,
+      questionText: question?.text ?? "",
+      correctAnswerText: question ? question.options.filter((option) => option.isCorrect).map((option) => option.text).join(", ") : "",
+      answeredText: payload.textAnswer ?? selectedLabels.join(", "),
+    });
+
+    const updatedParticipants = await refreshParticipants(activeSession.id).catch(() => null);
+    if (updatedParticipants) {
+      const updated = updatedParticipants.find((item) => item.id === activeParticipant.id);
+      if (updated) {
+        setActiveParticipant({
+          ...activeParticipant,
+          score: updated.score,
+          status: updated.status,
+          finishedAt: updated.finishedAt,
+        });
+      }
+    }
+  };
+
+  const handleNextQuestion = async () => {
+    if (!activeSession || !activeQuiz) {
+      throw new Error("No active session");
+    }
+
+    const result = await nextQuestion(activeSession.id);
+    setActiveSession({ ...activeSession, currentQuestionIndex: result.questionIndex });
+    setLatestAnswer(null);
+
+    if (result.questionIndex >= activeQuiz.questions.length) {
+      setScreen("leaderboard-final");
+    } else {
+      setScreen("question");
+    }
+  };
+
+  const handleSaveQuiz = (quiz: QuizWithQuestions) => {
+    setActiveQuiz(quiz);
+    setActiveQuizId(quiz.id);
+    setScreen("quiz-saved");
+  };
 
   const renderScreen = () => {
+    if (booting) {
+      return (
+        <div className="min-h-screen bg-[#f2f3f5] flex items-center justify-center text-[#818c99]">
+          Загрузка…
+        </div>
+      );
+    }
+
+    if (!authUser && screen !== "login" && screen !== "register") {
+      return <LoginScreen onLogin={handleLogin} onGoRegister={() => setScreen("register")} loading={loginLoading} error={loginError} />;
+    }
+
     switch (screen) {
-      case "login": return <LoginScreen setScreen={setScreen} />;
-      case "register": return <RegisterScreen setScreen={setScreen} />;
-      case "dashboard": return <DashboardScreen setScreen={setScreen} />;
-      case "profile": return <ProfileScreen setScreen={setScreen} />;
-      case "my-quizzes": return <MyQuizzesScreen setScreen={setScreen} />;
-      case "quiz-create": return <QuizCreateScreen setScreen={setScreen} />;
-      case "quiz-saved": return <QuizSavedScreen setScreen={setScreen} />;
-      case "quiz-launch": return <QuizLaunchScreen setScreen={setScreen} />;
-      case "waiting-room": return <WaitingRoomScreen setScreen={setScreen} />;
-      case "question": return <QuestionScreen setScreen={setScreen} />;
-      case "answer-result": return <AnswerResultScreen setScreen={setScreen} />;
-      case "organizer-control": return <OrganizerControlScreen setScreen={setScreen} />;
-      case "leaderboard-mid": return <LeaderboardMidScreen setScreen={setScreen} />;
-      case "leaderboard-final": return <LeaderboardFinalScreen setScreen={setScreen} />;
-      case "result-details": return <ResultDetailsScreen setScreen={setScreen} />;
-      case "analytics": return <AnalyticsScreen setScreen={setScreen} />;
+      case "login": return <LoginScreen onLogin={handleLogin} onGoRegister={() => setScreen("register")} loading={loginLoading} error={loginError} />;
+      case "register": return <RegisterScreen onRegister={handleRegister} onGoLogin={() => setScreen("login")} loading={registerLoading} error={registerError} success={registerSuccess} />;
+      case "dashboard": return <DashboardScreen setScreen={setScreen} user={authUser} onLogout={handleLogout} onJoinSession={handleJoinSession} onOpenQuiz={handleOpenQuiz} />;
+      case "profile": return <ProfileScreen setScreen={setScreen} user={authUser} onLogout={handleLogout} />;
+      case "my-quizzes": return <MyQuizzesScreen setScreen={setScreen} onEditQuiz={handleOpenQuiz} onLaunchQuiz={(quizId) => { setActiveQuizId(quizId); setScreen("quiz-launch"); }} />;
+      case "quiz-create": return <QuizCreateScreen setScreen={setScreen} quizId={activeQuizId} onSaved={handleSaveQuiz} />;
+      case "quiz-saved": return <QuizSavedScreen setScreen={setScreen} quiz={activeQuiz} onEdit={() => setScreen("quiz-create")} onOpenMyQuizzes={() => setScreen("my-quizzes")} onLaunch={() => setScreen("quiz-launch")} />;
+      case "quiz-launch": return <QuizLaunchScreen setScreen={setScreen} quizId={activeQuizId} quiz={activeQuiz} session={activeSession} onCreateSession={handleCreateSession} onStartSession={handleStartSession} />;
+      case "waiting-room": return <WaitingRoomScreen setScreen={setScreen} session={activeSession} participant={activeParticipant} quiz={activeQuiz} />;
+      case "question": return <QuestionScreen setScreen={setScreen} quiz={activeQuiz} session={activeSession} participant={activeParticipant} onSubmit={handleSubmitAnswer} />;
+      case "answer-result": return <AnswerResultScreen setScreen={setScreen} quiz={activeQuiz} session={activeSession} latestAnswer={latestAnswer} onNextQuestion={handleNextQuestion} />;
+      case "organizer-control": return <OrganizerControlScreen setScreen={setScreen} session={activeSession} quiz={activeQuiz} />;
+      case "leaderboard-mid": return <LeaderboardMidScreen setScreen={setScreen} session={activeSession} participants={participants} />;
+      case "leaderboard-final": return <LeaderboardFinalScreen setScreen={setScreen} session={activeSession} quiz={activeQuiz} participants={participants} />;
+      case "result-details": return <ResultDetailsScreen setScreen={setScreen} session={activeSession} participant={activeParticipant} />;
+      case "analytics": return <AnalyticsScreen setScreen={setScreen} quiz={activeQuiz} participants={participants} session={activeSession} />;
+      default: return <LoginScreen onLogin={handleLogin} onGoRegister={() => setScreen("register")} loading={loginLoading} error={loginError} />;
     }
   };
 
   return (
     <div className="min-h-screen bg-background font-[Inter,sans-serif]">
       {renderScreen()}
-      <ScreenPicker current={screen} onChange={setScreen} />
     </div>
   );
 }

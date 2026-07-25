@@ -287,7 +287,7 @@ export async function register(
 ) {
   const { data, error } =
     await supabase.auth.signUp({
-      email,
+      email: email.trim().toLowerCase(),
 
       password,
 
@@ -314,7 +314,7 @@ export async function login(
 ) {
   const { data, error } =
     await supabase.auth.signInWithPassword({
-      email,
+      email: email.trim().toLowerCase(),
       password,
     });
 
@@ -1660,4 +1660,71 @@ export async function getMyHistory(): Promise<HistoryItem[]> {
   }
 
   return result;
+}
+
+export interface ParticipantAnswerDetail extends ParticipantAnswer {
+  questionText: string;
+  correctAnswerText: string;
+}
+
+export async function getParticipantAnswers(
+  participantId: string,
+): Promise<ParticipantAnswerDetail[]> {
+  const { data: answerRows, error: answerError } = await supabase
+    .from("participant_answers")
+    .select("*")
+    .eq("participant_id", participantId)
+    .order("answered_at", { ascending: false });
+
+  if (answerError) {
+    throw answerError;
+  }
+
+  const questionIds = (answerRows ?? []).map((row) => row.question_id);
+  let questionRows: any[] = [];
+  let optionRows: any[] = [];
+
+  if (questionIds.length > 0) {
+    const { data: questionsData, error: questionsError } = await supabase
+      .from("questions")
+      .select("*")
+      .in("id", questionIds);
+
+    if (questionsError) {
+      throw questionsError;
+    }
+
+    questionRows = questionsData ?? [];
+
+    const { data: optionsData, error: optionsError } = await supabase
+      .from("answer_options")
+      .select("*")
+      .in("question_id", questionIds)
+      .order("option_order", { ascending: true });
+
+    if (optionsError) {
+      throw optionsError;
+    }
+
+    optionRows = optionsData ?? [];
+  }
+
+  return (answerRows ?? []).map((row) => {
+    const question = questionRows.find((item) => item.id === row.question_id);
+    const options = optionRows.filter((item) => item.question_id === row.question_id);
+    const correctOptions = options.filter((item) => item.is_correct).map((item) => item.text);
+
+    return {
+      id: row.id,
+      participantId: row.participant_id,
+      questionId: row.question_id,
+      selectedOptionIds: row.selected_option_ids ?? [],
+      textAnswer: row.text_answer ?? undefined,
+      isCorrect: row.is_correct,
+      pointsAwarded: row.points_awarded,
+      answeredAt: row.answered_at,
+      questionText: question?.text ?? "",
+      correctAnswerText: correctOptions.join(", ") || question?.text || "",
+    };
+  });
 }

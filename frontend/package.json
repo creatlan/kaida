@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "dev": "vite"
+    "dev": "vite",
+    "seed:demo": "node scripts/seed-demo.mjs",
+    "seed:activity": "node scripts/seed-activity.mjs"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",
